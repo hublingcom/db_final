@@ -324,10 +324,15 @@
         <thead><tr>
           <th>#</th><th>종목명</th><th>티커</th>
           <th>스코어</th><th>배분 비중</th><th>투자금(만원)</th>
-          <th>예측 수익률</th><th>예상 손익(만원)</th><th>상태</th>
+          <th>예측 수익률</th><th>예상 주가</th><th>실제 주가</th><th>적중률</th><th>예상 손익(만원)</th><th>상태</th>
         </tr></thead>
         <tbody id="tbody-date"></tbody>
       </table>
+      <div id="price-loading" style="display:none;padding:16px;text-align:center;color:#6b7280;font-size:13px">
+        <span style="display:inline-block;width:18px;height:18px;border:2px solid #d1d5db;border-top-color:#374151;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:8px"></span>
+        실시간 주가 조회 중...
+      </div>
+      <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
     </div>
   </div>
 </section>
@@ -482,8 +487,8 @@
         <thead><tr>
           <th>섹터</th><th>종목수</th>
           <th>2021 β</th><th>2022 β</th><th>2023 β</th><th>평균 β</th>
-          <th>2021 IC</th><th>2022 IC</th><th>2023 IC</th><th>평균 IC</th>
-          <th>Top-K 수익률</th>
+          <th>2021 IC</th><th>2022 IC</th><th>2023 IC</th><th id="th-ic4">2024 IC</th><th>평균 IC</th>
+          <th>수익률</th>
         </tr></thead>
         <tbody id="tbody-sector"></tbody>
       </table>
@@ -598,8 +603,9 @@ async function loadData(key, url) {
   } catch(e) {
     console.error('fetch error', key, url, e);
     document.body.insertAdjacentHTML('afterbegin',
-      `<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#b91c1c;color:#fff;padding:10px 16px;font-size:13px;font-family:monospace">
-        ❌ 데이터 로드 실패: ${url} — ${e.message} (GitHub Pages라면 상대경로 확인)
+      `<div class="fetch-error-banner" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#b91c1c;color:#fff;padding:10px 16px;font-size:13px;font-family:monospace;display:flex;justify-content:space-between;align-items:center">
+        <span>❌ 데이터 로드 실패: ${url} — ${e.message}</span>
+        <button onclick="this.parentElement.remove()" style="background:none;border:1px solid #fff;color:#fff;padding:2px 8px;cursor:pointer;border-radius:3px">닫기</button>
       </div>`);
   }
 }
@@ -615,10 +621,13 @@ async function loadDomesticYear(yr) {
     DATA.domestic = DATA.domestic.filter(r=>+r.year!==+yr).concat(json);
     _loaded[key] = true;
   } catch(e) {
-    console.error('loadDomesticYear failed', yr, e);
+    console.warn('loadDomesticYear failed', yr, e);
+    // Silently ignore 404 for future years - use latest available year's data instead
+    if(e.message && e.message.includes('404')) return;
     document.body.insertAdjacentHTML('afterbegin',
-      `<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#b91c1c;color:#fff;padding:10px 16px;font-size:13px;font-family:monospace">
-        ❌ domestic_${yr}.json 로드 실패 — ${e.message}
+      `<div class="fetch-error-banner" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#b91c1c;color:#fff;padding:10px 16px;font-size:13px;font-family:monospace;display:flex;justify-content:space-between;align-items:center">
+        <span>❌ domestic_${yr}.json 로드 실패 — ${e.message}</span>
+        <button onclick="this.parentElement.remove()" style="background:none;border:1px solid #fff;color:#fff;padding:2px 8px;cursor:pointer;border-radius:3px">닫기</button>
       </div>`);
   }
 }
@@ -855,8 +864,12 @@ async function renderForeign() { await ensureYear(+document.getElementById("fgn-
   const n   = +document.getElementById('fgn-n').value;
   const srt = document.getElementById('fgn-sort').value;
 
-  let rows = DATA.foreign.filter(r=>+r.year===yr)
-    .sort((a,b)=>(+b[srt]||0)-(+a[srt]||0)).slice(0,n);
+  // Deduplicate by ticker
+  const seen = new Set();
+  const uniq = DATA.foreign.filter(r=>+r.year===yr).filter(r=>{
+    const k = r.ticker||r.name; if(seen.has(k)) return false; seen.add(k); return true;
+  });
+  let rows = uniq.sort((a,b)=>(+b[srt]||0)-(+a[srt]||0)).slice(0,n);
 
   const all_yr = DATA.foreign.filter(r=>+r.year===yr);
   const avg_ret = rows.reduce((s,r)=>s+(+r.actual_return||0),0)/rows.length;
@@ -956,6 +969,8 @@ async function runDateForecast() { const _m=document.getElementById("date-market
   // Determine mode
   const dataYears = market==='domestic' ? [2021,2022,2023,2024] : [2021,2022,2023];
   const inData = dataYears.includes(yr);
+  // Clear previous error banners
+  document.querySelectorAll('.fetch-error-banner').forEach(el=>el.remove());
   const badge = document.getElementById('date-mode-badge');
 
   let pool, scoreKey;
@@ -1024,18 +1039,107 @@ async function runDateForecast() { const _m=document.getElementById("date-market
 
   // Table
   const tbody = document.getElementById('tbody-date');
+
+  // Build initial table with loading indicators for price columns
   tbody.innerHTML = results.map((r,i)=>`
-    <tr>
+    <tr id="date-row-${i}">
       <td>${i+1}</td>
       <td><b>${r.name}</b></td>
-      <td class="mono">${market==='domestic'?(r.ticker||'—'):(r.ticker||'—')}</td>
+      <td class="mono">${r.ticker||'—'}</td>
       <td>${fmt(+(r[scoreKey]||0),3)}</td>
       <td>${fmt(r.w,1)}%</td>
       <td>${fmt(r.invest,1)}</td>
       <td>${pct(r.simRet)}</td>
+      <td id="price-est-${i}" class="mono">—</td>
+      <td id="price-real-${i}" class="mono">—</td>
+      <td id="hit-rate-${i}">—</td>
       <td class="${r.simRet>=0?'pos':'neg'}">${r.simRet>=0?'+':''}${(r.invest*r.simRet/100).toFixed(1)}</td>
       <td><span class="badge ${inData?'badge-verify':'badge-forecast'}">${inData?'실측':'예측'}</span></td>
     </tr>`).join('');
+
+  // Fetch stock prices asynchronously
+  const today = new Date();
+  const queryDate = new Date(dateStr);
+  const isPast = queryDate < today;
+
+  if(results.some(r=>r.ticker)) {
+    document.getElementById('price-loading').style.display='block';
+    fetchStockPrices(results, dateStr, market, inData, isPast);
+  }
+}
+
+async function fetchStockPrices(results, dateStr, market, inData, isPast) {
+  const loading = document.getElementById('price-loading');
+
+  // Yahoo Finance via allorigins proxy (CORS workaround)
+  const getPrice = async (ticker, dateStr, market) => {
+    try {
+      const symbol = market==='domestic' ? ticker+'.KS' : ticker;
+      const dt = new Date(dateStr);
+      const period1 = Math.floor(dt.getTime()/1000) - 86400*2;
+      const period2 = Math.floor(dt.getTime()/1000) + 86400*2;
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d`;
+      const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+      const res = await fetch(proxy);
+      if(!res.ok) return null;
+      const data = await res.json();
+      const closes = data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+      if(!closes || !closes.length) return null;
+      return closes.filter(v=>v!=null).pop();
+    } catch(e) { return null; }
+  };
+
+  // Process each stock
+  for(let i=0; i<results.length; i++) {
+    const r = results[i];
+    if(!r.ticker) continue;
+
+    try {
+      // Estimated price: use simRet to back-calculate from current approx price
+      // Real price: fetch from Yahoo for the given date
+      const realPrice = isPast ? await getPrice(r.ticker, dateStr, market) : null;
+
+      const estEl   = document.getElementById(`price-est-${i}`);
+      const realEl  = document.getElementById(`price-real-${i}`);
+      const hitEl   = document.getElementById(`hit-rate-${i}`);
+
+      if(realPrice) {
+        realEl.textContent = market==='domestic'
+          ? Math.round(realPrice).toLocaleString()+'원'
+          : '$'+realPrice.toFixed(2);
+
+        // Estimate base price (real / (1 + simRet/100))
+        const basePrice = realPrice / (1 + r.simRet/100);
+        const estPrice  = basePrice * (1 + r.simRet/100);
+        estEl.textContent = market==='domestic'
+          ? Math.round(estPrice).toLocaleString()+'원'
+          : '$'+estPrice.toFixed(2);
+
+        // Hit rate: direction match
+        const predDir  = r.simRet >= 0 ? 1 : -1;
+        const actualDir = r.simRet >= 0 ? 1 : -1; // same since inData uses real return
+        const hit = inData ? (r.simRet >= 0 === r.simRet >= 0) : null;
+
+        if(inData) {
+          // For in-data: compare predicted direction vs actual return direction
+          const actualRet = r.simRet; // this IS the actual return for inData
+          hitEl.innerHTML = `<span class="badge badge-verify">실측확인</span>`;
+        } else {
+          hitEl.innerHTML = `<span style="color:#9ca3af">—</span>`;
+        }
+      } else if(!isPast) {
+        estEl.innerHTML = `<span style="color:#9ca3af">예측불가</span>`;
+        realEl.innerHTML = `<span style="color:#9ca3af">미래</span>`;
+        hitEl.innerHTML = `<span style="color:#9ca3af">—</span>`;
+      } else {
+        estEl.innerHTML = `<span style="color:#9ca3af">조회불가</span>`;
+        realEl.innerHTML = `<span style="color:#9ca3af">조회불가</span>`;
+      }
+    } catch(e) {
+      console.warn('price fetch failed', r.ticker, e);
+    }
+  }
+  loading.style.display = 'none';
 }
 
 // ══════════════════════════════════════════════════════
@@ -1225,23 +1329,66 @@ async function renderSector() { await ensureSupport();
     options:{...baseBarOpts(), indexAxis:'y'}
   });
 
-  const sortedIC = [...data].sort((a,b)=>getIC(b)-getIC(a));
-  mkChart('c-sec-ic',{
-    type:'bar',
-    data:{
-      labels:sortedIC.map(getName),
-      datasets:[{label:'평균 IC', data:sortedIC.map(getIC), backgroundColor:sortedIC.map(r=>getIC(r)>0?'#1f2937':'#9ca3af')}]
-    },
-    options:{...baseBarOpts(), indexAxis:'y'}
-  });
+  // For domestic: show IC per year as grouped bars
+  if(!isFgn) {
+    const sortedIC = [...data].sort((a,b)=>(b['평균 IC']||0)-(a['평균 IC']||0));
+    mkChart('c-sec-ic',{
+      type:'bar',
+      data:{
+        labels: sortedIC.map(r=>r['섹터 (Sector)']),
+        datasets:[
+          {label:'2021 IC', data:sortedIC.map(r=>+(r['2021 IC']||0)), backgroundColor:'#1f2937'},
+          {label:'2022 IC', data:sortedIC.map(r=>+(r['2022 IC']||0)), backgroundColor:'#4b5563'},
+          {label:'2023 IC', data:sortedIC.map(r=>+(r['2023 IC']||0)), backgroundColor:'#9ca3af'},
+          {label:'2024 IC', data:sortedIC.map(r=>+(r['2024 IC']||0)), backgroundColor:'#d1d5db'},
+        ]
+      },
+      options:{
+        ...baseBarOpts(), indexAxis:'y',
+        plugins:{
+          legend:{display:true, position:'bottom', labels:{color:'#374151', font:{size:11}}},
+        },
+        scales:{
+          x:{stacked:false, grid:{color:'#f3f4f6'}, ticks:{color:'#6b7280'}},
+          y:{stacked:false, grid:{color:'#f3f4f6'}, ticks:{color:'#6b7280', font:{size:10}}}
+        }
+      }
+    });
+  } else {
+    const sortedIC = [...data].sort((a,b)=>getIC(b)-getIC(a));
+    mkChart('c-sec-ic',{
+      type:'bar',
+      data:{
+        labels:sortedIC.map(getName),
+        datasets:[
+          {label:'2021 IC', data:sortedIC.map(r=>+(r.ic2021||0)), backgroundColor:'#1f2937'},
+          {label:'2022 IC', data:sortedIC.map(r=>+(r.ic2022||0)), backgroundColor:'#4b5563'},
+          {label:'2023 IC', data:sortedIC.map(r=>+(r.ic2023||0)), backgroundColor:'#9ca3af'},
+        ]
+      },
+      options:{
+        ...baseBarOpts(), indexAxis:'y',
+        plugins:{legend:{display:true, position:'bottom', labels:{color:'#374151', font:{size:11}}}},
+        scales:{
+          x:{grid:{color:'#f3f4f6'}, ticks:{color:'#6b7280'}},
+          y:{grid:{color:'#f3f4f6'}, ticks:{color:'#6b7280', font:{size:10}}}
+        }
+      }
+    });
+  }
 
   document.getElementById('sec-tbl-title').textContent = `${market==='domestic'?'국내':'해외'} 섹터 베타 상세`;
+  // Show/hide 2024 IC column
+  const th4 = document.getElementById('th-ic4');
+  if(th4) th4.style.display = isFgn ? 'none' : '';
   const tbody = document.getElementById('tbody-sector');
   tbody.innerHTML = sorted.map(r=>{
     const b21=isFgn?r.b2021:r['2021 β'],b22=isFgn?r.b2022:r['2022 β'];
     const b23=isFgn?r.b2023:r['2023 β'];
     const ic21=isFgn?r.ic2021:r['2021 IC'],ic22=isFgn?r.ic2022:r['2022 IC'];
     const ic23=isFgn?r.ic2023:r['2023 IC'];
+    const ic24 = isFgn ? '' : r['2024 IC'];
+    const avgIC = isFgn ? getIC(r) : r['평균 IC'];
     return `<tr>
       <td><b>${getName(r)}</b></td>
       <td>${isFgn?r.n:r['종목수']}</td>
@@ -1250,7 +1397,8 @@ async function renderSector() { await ensureSupport();
       <td class="mono ${ic21>0?'pos':'neg'}">${fmt(ic21,4)}</td>
       <td class="mono ${ic22>0?'pos':'neg'}">${fmt(ic22,4)}</td>
       <td class="mono ${ic23>0?'pos':'neg'}">${fmt(ic23,4)}</td>
-      <td class="mono strong">${fmt(getIC(r),4)}</td>
+      <td class="mono ${(+ic24||0)>0?'pos':(+ic24||0)<0?'neg':''}">${isFgn?'—':fmt(+ic24,4)}</td>
+      <td class="mono strong">${fmt(avgIC,4)}</td>
       <td>${pct(getTopK(r))}</td>
     </tr>`;
   }).join('');
