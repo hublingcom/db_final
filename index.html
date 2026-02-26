@@ -597,16 +597,23 @@ async function loadData(key, url) {
       DATA.domestic = json;
     } else if(key==='foreign') {
       DATA.foreign = json;
-      // compute Y_opt_D score
+      // CSV에 Y_score (이미 계산된 값) + final_score 있으나 재계산으로 일관성 확보
       const w = [-0.8524,-0.4204,-0.2346,-0.1714,-0.4450];
       const fts = ['value_score','stake_score','trend_score','sec_score','bulk'];
       const years = [...new Set(json.map(r=>+r.year))];
       years.forEach(yr=>{
         const sub = json.filter(r=>+r.year===yr);
-        const raws = sub.map(r=>fts.reduce((s,f,i)=>s+w[i]*(+r[f]||0),0));
+        // null/NaN 안전처리
+        const raws = sub.map(r=>fts.reduce((s,f,i)=>s+w[i]*(+(r[f]??0)||0),0));
         const mn=Math.min(...raws), mx=Math.max(...raws);
-        sub.forEach((r,i)=>{ r.Y_opt_score = mx>mn ? (raws[i]-mn)/(mx-mn)*100 : 50; });
-        sub.forEach(r=>{ r.final_score_new = 0.915*(r.Y_opt_score/100)+0.085*(+r.Z_score_norm||0); });
+        sub.forEach((r,i)=>{
+          r.Y_opt_score = mx>mn ? (raws[i]-mn)/(mx-mn)*100 : 50;
+          // Z_score_norm null 처리
+          const z = r.Z_score_norm !== null && r.Z_score_norm !== undefined ? +(r.Z_score_norm) : 0.5;
+          r.final_score_new = 0.915*(r.Y_opt_score/100) + 0.085*z;
+          // ticker → name 보완 (CSV는 name 컬럼 존재)
+          if(!r.name && r.ticker) r.name = r.ticker;
+        });
       });
     } else if(key==='zscore') {
       DATA.zscore = json;
@@ -814,18 +821,67 @@ async function renderDomestic() { await ensureYear(+document.getElementById("dom
 
   let rows = DATA.domestic.filter(r=>+r.year===yr && r.asset_class==='domestic_equity');
 
-  // Sector filter
+  // Sector filter - dsec의 Eng Name별 ticker 매핑 후 필터링
   const sectors = [...new Set(DATA.dsec.map(r=>r['섹터 (Sector)']))];
   const secSel = document.getElementById('dom-sector');
   if(secSel.options.length<=1) {
-    sectors.forEach(s=>{ const o=document.createElement('option'); o.value=s; o.textContent=s; secSel.appendChild(o); });
+    sectors.sort().forEach(s=>{ const o=document.createElement('option'); o.value=s; o.textContent=s; secSel.appendChild(o); });
+  }
+  const selSec = secSel.value;
+
+  // 섹터 선택시 필터 적용
+  // y_score_real_final 데이터에 sector 컬럼이 없으므로 종목명/ticker 키워드 매핑
+  const SECTOR_KEYWORDS = {
+    '2차전지/배터리': ['배터리','에코프로','포스코퓨처','엘앤에프','코스모신소재','천보','나노신소재','솔루스'],
+    '건설':['건설','GS건설','현대건설','대우건설','HDC','DL이앤씨','삼성물산','포스코이앤씨'],
+    '게임/엔터':['크래프톤','엔씨소프트','넥슨','카카오게임','하이브','SM','JYP','와이지'],
+    '금융':['은행','금융','증권','보험','하나','신한','KB','우리금융','메리츠'],
+    '기계/방산/조선':['현대중공업','대우조선','한화','LIG넥스원','현대로템','방산','조선'],
+    '바이오/제약':['바이오','제약','셀트리온','삼성바이오','녹십자','유한양행','종근당','한미약품'],
+    '반도체/IT':['삼성전자','SK하이닉스','DB하이텍','리노공업','한미반도체','반도체'],
+    '비철금속':['고려아연','풍산','비철'],
+    '소비재':['CJ','농심','오리온','롯데','KT&G','빙그레','소비'],
+    '에너지/유틸리티':['한국전력','한국가스','에너지','유틸리티','SK이노베이션','GS'],
+    '유통':['롯데쇼핑','이마트','신세계','현대백화점','유통'],
+    '인터넷/플랫폼&게임':['카카오','네이버','NHN','더블유게임즈'],
+    '자동차':['현대차','기아','현대모비스','한온시스템','자동차'],
+    '전기/전자':['LG전자','삼성SDI','LG에너지','LS일렉트릭','전기전자'],
+    '철강/금속':['POSCO','포스코','현대제철','동국제강','철강'],
+    '통신':['SKT','KT','LG유플러스','통신'],
+    '화학/소재':['LG화학','롯데케미칼','효성','SKC','화학','소재'],
+  };
+
+  if(selSec && selSec !== 'all') {
+    const keywords = SECTOR_KEYWORDS[selSec] || [];
+    if(keywords.length) {
+      rows = rows.filter(r => {
+        const nm = (r.name || '').toLowerCase();
+        return keywords.some(k => nm.includes(k.toLowerCase()));
+      });
+    }
+    // IC도 해당 섹터 것으로 업데이트
+    const PAPER_IC_AVG2 = {
+      '철강/금속':0.5804,'자동차':0.4714,'소비재':0.4594,'반도체/IT':0.4355,
+      '비철금속':0.4340,'금융':0.4253,'바이오/제약':0.4169,'기계/방산/조선':0.3826,
+      '화학/소재':0.3700,'게임/엔터':0.3697,'통신':0.3557,'건설':0.3488,
+      '전기/전자':0.3435,'에너지/유틸리티':0.3213,'인터넷/플랫폼&게임':0.3205,
+      '2차전지/배터리':0.3090,'유통':0.1765,
+    };
+    const secIC = PAPER_IC_AVG2[selSec];
+    if(secIC !== undefined) {
+      // KPI의 IC 값을 해당 섹터 IC로 교체 (아래 kpi() 호출보다 먼저 설정)
+      window._domSecIC = secIC;
+    }
+  } else {
+    window._domSecIC = null;
   }
 
   rows = rows.sort((a,b)=>(+b[srt]||0)-(+a[srt]||0)).slice(0,n);
 
   // KPIs
   const avg_ret = rows.reduce((s,r)=>s+(+r['연간수익률(r_t)']||0),0)/rows.length;
-  const avg_ic  = [0.174,0.608,0.209,0.625][['2021','2022','2023','2024'].indexOf(''+yr)]||0;
+  const _baseIC = [0.174,0.608,0.209,0.625][['2021','2022','2023','2024'].indexOf(''+yr)]||0;
+  const avg_ic  = window._domSecIC !== null && window._domSecIC !== undefined ? window._domSecIC : _baseIC;
   kpi('dom-kpi',[
     {label:`${yr}년 Top${n} 평균 수익률`, value:`${avg_ret>=0?'+':''}${avg_ret.toFixed(1)}%`, trend:avg_ret>0?'up':'down'},
     {label:'평균 Final Score', value:fmt(rows.reduce((s,r)=>s+(+r.Final_Score||0),0)/rows.length)},
@@ -1176,29 +1232,44 @@ async function runDateForecast() { const _m=document.getElementById("date-market
     return d>0&&d<6&&(h>9||(h===9&&m>=0))&&(h<15||(h===15&&m<30));
   })();
 
-  const getReturn = (r) => {
+  // 모델 예측 수익률: Final_Score 기반 (실제수익률과 독립적)
+  const getModelRet = (r) => {
+    const yOpt  = market==='domestic' ? +(r.Y_opt||0) : +(r.Y_opt_score||0)/100;
+    const zNorm = +(r.Z_score_norm ?? 0.5);
+    const alpha = market==='domestic' ? 0.852 : 0.915;
+    const betaW = market==='domestic' ? 0.148 : 0.085;
+    const finalS = alpha*yOpt + betaW*zNorm;
+    // 스코어 → 수익률 변환: 국내 중위 스코어(0.3) = 0%, 1.0 = +100% 선형
+    const base = market==='domestic' ? 143 : 40;
+    return (finalS - 0.3) * base;
+  };
+
+  // 실제 수익률 (inData일 때만 사용 가능)
+  const getActualRet = (r) => {
     if(inData) return market==='domestic' ? +(r['연간수익률(r_t)']||0) : +(r.actual_return||0);
-    // 미래 예측: 모델 스코어 기반 추정 (해외는 Y_opt_score 기준)
-    const score = market==='domestic' ? +(r[scoreKey]||0) : +(r.Y_opt_score||0)/100;
-    // 해외: 과거 평균수익률 × 스코어 가중치
-    const base = market==='domestic' ? 60 : 30;
-    return (score * base - base*0.3 + (Math.random()-0.3)*15);
+    return null;
   };
 
   const results = rows.map((r,i)=>({
     ...r,
-    simRet: getReturn(r),
+    simRet:    getModelRet(r),    // 항상 모델 예측값
+    actualRet: getActualRet(r),   // 실제값 (inData만)
     w: rawWeights[i]*100,
     invest: amt*rawWeights[i]
   }));
-  const portRet = results.reduce((s,r)=>s+r.simRet*r.w/100,0);
-  const portPnL = results.reduce((s,r)=>s+r.invest*(r.simRet/100),0);
+  // 포트폴리오 수익률: inData면 실제, 아니면 모델예측
+  const portRetModel  = results.reduce((s,r)=>s+r.simRet*(r.w/100),0);
+  const portRetActual = inData ? results.reduce((s,r)=>s+(r.actualRet||0)*(r.w/100),0) : portRetModel;
+  const portRet = inData ? portRetActual : portRetModel;
+  const portPnL = results.reduce((s,r)=>s+r.invest*(inData ? (r.actualRet||0) : r.simRet)/100,0);
 
   kpi('date-kpi',[
-    {label:'포트폴리오 예상 수익률', value:`${portRet>=0?'+':''}${portRet.toFixed(2)}%`, trend:portRet>0?'up':'down'},
-    {label:'예상 손익', value:`${portPnL>=0?'+':''}${portPnL.toFixed(0)}만원`, trend:portPnL>0?'up':'down'},
+    {label: inData ? '포트폴리오 실제 수익률' : '포트폴리오 예상 수익률',
+     value:`${portRet>=0?'+':''}${portRet.toFixed(2)}%`, trend:portRet>0?'up':'down'},
+    {label: inData ? '실제 손익' : '예상 손익',
+     value:`${portPnL>=0?'+':''}${portPnL.toFixed(0)}만원`, trend:portPnL>0?'up':'down'},
     {label:'평가금액', value:`${(amt+portPnL).toFixed(0)}만원`},
-    {label:'투자 기준일', value:dateStr, sub:inData?'실데이터':'예측모드'},
+    {label:'투자 기준일', value:dateStr, sub:inData?`실데이터 (모델예측: ${portRetModel>=0?'+':''}${portRetModel.toFixed(1)}%)`:'예측모드'},
   ]);
 
   // Charts
@@ -1206,9 +1277,18 @@ async function runDateForecast() { const _m=document.getElementById("date-market
     type:'bar',
     data:{
       labels:results.map(r=>market==='domestic'?(r.name?.slice(0,6)||'—'):(r.ticker||r.name?.slice(0,5)||'—')),
-      datasets:[{label:'예상 수익률(%)', data:results.map(r=>r.simRet), backgroundColor:results.map(r=>r.simRet>=0?'#1f2937':'#9ca3af')}]
+      datasets:[
+        {label: inData ? '실제 수익률(%)' : '모델 예측(%)',
+         data:results.map(r=>inData?(r.actualRet||0):r.simRet),
+         backgroundColor:results.map(r=>(inData?(r.actualRet||0):r.simRet)>=0?'#1f2937':'#9ca3af')},
+        ...(inData ? [{label:'모델 예측(%)', data:results.map(r=>r.simRet),
+          backgroundColor:'rgba(107,114,128,0.4)', borderColor:'#6b7280',
+          type:'bar', borderWidth:1}] : [])
+      ]
     },
-    options:baseBarOpts()
+    options:{...baseBarOpts(), plugins:{...baseBarOpts().plugins,
+      legend:{display:inData, position:'top', labels:{color:'#374151',font:{size:11}}}
+    }}
   });
   mkChart('c-date-pie',{
     type:'doughnut',
@@ -1231,7 +1311,7 @@ async function runDateForecast() { const _m=document.getElementById("date-market
       <td>${fmt(+(r[scoreKey]||0),3)}</td>
       <td>${fmt(r.w,1)}%</td>
       <td>${fmt(r.invest,1)}</td>
-      <td>${pct(r.simRet)}</td>
+      <td>${inData ? pct(r.actualRet||0)+' <small style="color:#9ca3af">(모델:'+pct(r.simRet)+')</small>' : pct(r.simRet)}</td>
       <td id="price-est-${i}" class="mono">—</td>
       <td id="price-real-${i}" class="mono">—</td>
       <td id="hit-rate-${i}">—</td>
@@ -1274,6 +1354,7 @@ async function fetchStockPrices(results, dateStr, market, inData, isPast) {
 
     // 시도 2: stooq (국내: 티커.KS, 해외: 티커.US)
     try {
+      // 국내: .kw (KSE/KOSPI/KOSDAQ 통합 심볼)
       const stooqSym = mkt==='domestic' ? ticker.toLowerCase()+'.kw' : ticker.toLowerCase()+'.us';
       const d1 = new Date(dt.getTime()-86400*5*1000);
       const d2 = new Date(dt.getTime()+86400*2*1000);
@@ -1296,9 +1377,14 @@ async function fetchStockPrices(results, dateStr, market, inData, isPast) {
 
   // ── 연도 시작 기준가 조회 (예상주가 계산용) ──
   const getYearStartPrice = async (ticker, year, mkt) => {
-    // 1월 첫 거래일 근처 (1/2~1/8)
-    const startDate = `${year}-01-04`;
-    return await getPriceOnDate(ticker, startDate, mkt);
+    // 1월 첫 거래일 근처: 여러 날짜 시도
+    for(const dayOffset of [4,3,5,2,6,7,8]) {
+      const d = new Date(year, 0, dayOffset);
+      const ds = d.toISOString().slice(0,10);
+      const res = await getPriceOnDate(ticker, ds, mkt);
+      if(res && res.price > 0) return res;
+    }
+    return null;
   };
 
   // ── 주가 포맷 ──
@@ -1344,11 +1430,11 @@ async function fetchStockPrices(results, dateStr, market, inData, isPast) {
             }
           }
 
-          // 적중률: 모델예측방향 vs 실제수익률방향
+          // 적중률: 모델예측방향(simRet) vs 실제수익률방향(actualRet/데이터)
           if(inData) {
-            const trueRet = +(r['연간수익률(r_t)'] ?? r['actual_return'] ?? 0);
-            const predUp  = r.simRet >= 0;
-            const trueUp  = trueRet >= 0;
+            const trueRet = +(r.actualRet ?? r['연간수익률(r_t)'] ?? r['actual_return'] ?? 0);
+            const predUp  = r.simRet >= 0;   // 모델이 상승 예측?
+            const trueUp  = trueRet >= 0;    // 실제로 상승했나?
             const hit     = predUp === trueUp;
             hitEl.innerHTML = hit
               ? `<span class="badge badge-verify">✓ 적중</span>`
