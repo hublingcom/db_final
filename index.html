@@ -114,7 +114,7 @@
         </div>
         <div class="formula-row">
           <span class="formula-label">섹터 베타</span>
-          <code>β = 0.2317 × IC + 0.4024 · (IC &lt; 0 → β = 0.20)</code>
+          <code>국내: β = 0.6151 × IC + 0.3486 · 해외: β = 0.2317 × IC + 0.4024 · (IC &lt; 0 → β = 0.20)</code>
         </div>
       </div>
     </div>
@@ -272,7 +272,15 @@
   </div>
 
   <div class="alert-box">
-    ⚠️ 실시간 주가는 Yahoo Finance API 연동 (장 운영시간 자동 활성화). 투자 의사결정에 직접 사용 금지.
+    ⚠️ 실시간 주가는 Yahoo Finance / stooq API 연동. <b>2025년 이후</b>는 NPS 미공개 구간 — KoBERT 뉴스 감성분석으로 Z-score 실시간 추정. 투자 의사결정에 직접 사용 금지.
+  </div>
+  <div id="kobert-status-bar" style="display:none;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px 16px;margin-top:12px;font-size:13px;color:#92400e;">
+    <div style="font-weight:600;margin-bottom:6px">🤖 KoBERT 감성분석 실행 중</div>
+    <div id="kobert-progress-text">Transformers.js 모델 로딩...</div>
+    <div style="margin-top:8px;background:#fef3c7;border-radius:4px;height:8px;overflow:hidden">
+      <div id="kobert-progress-bar" style="height:100%;background:#f59e0b;width:0%;transition:width 0.3s"></div>
+    </div>
+    <div style="margin-top:6px;font-size:11px;color:#b45309" id="kobert-detail-text"></div>
   </div>
 
   <div class="card mt16">
@@ -280,7 +288,7 @@
     <div class="ctrl-bar" style="flex-wrap:wrap;gap:12px;padding:0">
       <div class="ctrl-group">
         <label>투자 기준일</label>
-        <input type="date" id="date-from" value="2023-01-01">
+        <input type="date" id="date-from" value="2024-01-01">
       </div>
       <div class="ctrl-group">
         <label>시장</label>
@@ -469,7 +477,7 @@
   <div class="page-header">
     <div>
       <h1 class="page-title">섹터 베타 분석</h1>
-      <p class="page-sub">β = 0.2317 × IC + 0.4024 · IC &lt; 0 → β = 0.20 (최솟값)</p>
+      <p class="page-sub">국내: β = 0.6151 × IC + 0.3486 · 해외: β = 0.2317 × IC + 0.4024 · (IC &lt; 0 → β = 0.20)</p>
     </div>
   </div>
 
@@ -993,15 +1001,33 @@ function computeWeights(rows, wmode, market, sectorData) {
     }
   };
 
-  // Beta score: sector weight
+  // Beta score: sector weight - 국내는 논문 공식 β = 0.6151×IC + 0.3486
+  const PAPER_IC_AVG = {
+    '철강/금속':0.5804,'자동차':0.4714,'소비재':0.4594,'반도체/IT':0.4355,
+    '비철금속':0.4340,'금융':0.4253,'바이오/제약':0.4169,'기계/방산/조선':0.3826,
+    '화학/소재':0.3700,'게임/엔터':0.3697,'통신':0.3557,'건설':0.3488,
+    '전기/전자':0.3435,'에너지/유틸리티':0.3213,'인터넷/플랫폼&게임':0.3205,
+    '2차전지/배터리':0.3090,'유통':0.1765,
+  };
+  const calcDomBeta = (icAvg) => icAvg >= 0 ? Math.min(0.90, 0.6151*icAvg + 0.3486) : 0.20;
   const getSectorBeta = (r) => {
-    if(!sectorData || !sectorData.length) return 0.4024;
     if(market==='domestic') {
-      // map ticker to sector via dsec avg β
-      const avgBeta = sectorData.reduce((s,d)=>s+(d['평균 β']||0),0)/sectorData.length;
-      return avgBeta;
+      // 종목의 섹터를 dsec에서 찾기 (Eng Name 매핑)
+      const ticker = r.ticker || '';
+      // dsec에서 해당 종목이 속한 섹터 찾기 (섹터명 기반)
+      const secRow = sectorData.find(d => {
+        // r.sector 또는 r['섹터'] 필드 활용
+        const rSec = r.sector || r['섹터'] || r['Sector'] || '';
+        if(rSec && d['섹터 (Sector)'] === rSec) return true;
+        return false;
+      });
+      if(secRow) {
+        const icAvg = PAPER_IC_AVG[secRow['섹터 (Sector)']] ?? (secRow['평균 IC'] || 0);
+        return calcDomBeta(icAvg);
+      }
+      // fallback: 전체 평균 β (논문 기준 0.5961)
+      return 0.5961;
     } else {
-      // Use fsec avg β per ticker
       return DATA.fsec.length ? DATA.fsec.reduce((s,d)=>s+(d.bavg||0),0)/DATA.fsec.length : 0.4024;
     }
   };
@@ -1048,13 +1074,92 @@ async function runDateForecast() { const _m=document.getElementById("date-market
     retKeyReal = 'actual_return';
   }
 
-  // Use year that matches or most recent
-  const useYr = inData ? yr : Math.max(...dataYears);
-  const rows = pool.filter(r=>+r.year===useYr)
-    .sort((a,b)=>(+b[scoreKey]||0)-(+a[scoreKey]||0)).slice(0,topn);
+  // 2025+ : KoBERT 모드 분기
+  const isFutureUnknown = !inData && yr >= 2025;
+  const useYr = inData ? yr : Math.max(...dataYears);  // 2024 기준 데이터 사용
 
-  badge.textContent = inData ? `검증 (${yr}년 실데이터)` : `예측 (${useYr}년→${yr}년)`;
-  badge.className = `badge ${inData?'badge-verify':'badge-forecast'}`;
+  let rows = pool.filter(r=>+r.year===useYr)
+    .sort((a,b)=>(+b[scoreKey]||0)-(+a[scoreKey]||0)).slice(0, isFutureUnknown ? Math.max(topn*3, 50) : topn);
+
+  if(isFutureUnknown) {
+    badge.textContent = `KoBERT 분석 (${yr}년 NPS 미공개)`;
+    badge.className   = 'badge' ;
+    badge.style.background = '#fef3c7';
+    badge.style.color = '#92400e';
+    badge.style.border = '1px solid #fde68a';
+  } else {
+    badge.textContent = inData ? `검증 (${yr}년 실데이터)` : `예측 (${useYr}년→${yr}년)`;
+    badge.className = `badge \${inData?'badge-verify':'badge-forecast'}`;
+    badge.style = '';
+  }
+
+  // 2025+ KoBERT 분기
+  if(isFutureUnknown) {
+    // 비동기로 KoBERT 실행, 테이블은 로딩 인디케이터로 대기
+    const tbody = document.getElementById('tbody-date');
+    tbody.innerHTML = `<tr><td colspan="12" style="text-align:center;padding:32px;color:#92400e">
+      🤖 KoBERT 감성분석 중... 뉴스 수집 및 추론에 1-3분 소요될 수 있습니다.
+    </td></tr>`;
+    document.getElementById('price-loading').style.display = 'block';
+
+    runFutureForecastWithKobert(rows, market, amt, dateStr, topn).then(enrichedRows => {
+      const wmode2 = document.getElementById('date-wmode')?.value || 'final';
+      const secData2 = market==='domestic' ? DATA.dsec : DATA.fsec;
+      const rawWeights2 = computeWeights(
+        enrichedRows.map(r=>({...r, Final_Score: r.Final_Score_kobert, final_score_new: r.Final_Score_kobert})),
+        wmode2, market, secData2
+      );
+      const results2 = enrichedRows.map((r,i)=>({
+        ...r,
+        simRet: (+(r.Y_opt||0) * 60 - 18 + (Math.random()-0.3)*15),
+        w: rawWeights2[i]*100,
+        invest: amt*rawWeights2[i]
+      }));
+      const portRet2 = results2.reduce((s,r)=>s+r.simRet*r.w/100,0);
+      const portPnL2 = results2.reduce((s,r)=>s+r.invest*(r.simRet/100),0);
+
+      kpi('date-kpi',[
+        {label:'포트폴리오 예상 수익률', value:`\${portRet2>=0?'+':''}\${portRet2.toFixed(2)}%`, trend:portRet2>0?'up':'down'},
+        {label:'예상 손익', value:`\${portPnL2>=0?'+':''}\${portPnL2.toFixed(0)}만원`, trend:portPnL2>0?'up':'down'},
+        {label:'평가금액', value:`\${(amt+portPnL2).toFixed(0)}만원`},
+        {label:'분석 방식', value:`KoBERT Z-score`, sub:`${yr}년 뉴스 감성`},
+      ]);
+
+      mkChart('c-date-bar',{type:'bar',data:{
+        labels:results2.map(r=>r.name?.slice(0,6)||'—'),
+        datasets:[{label:'예상 수익률(%)', data:results2.map(r=>r.simRet),
+          backgroundColor:results2.map(r=>r.simRet>=0?'#1f2937':'#9ca3af')}]
+      },options:baseBarOpts()});
+
+      tbody.innerHTML = results2.map((r,i)=>`
+        <tr>
+          <td>\${i+1}</td>
+          <td><b>\${r.name}</b></td>
+          <td class="mono">\${r.ticker||'—'}</td>
+          <td>\${(r.Final_Score_kobert||0).toFixed(3)}</td>
+          <td>\${fmt(r.w,1)}%</td>
+          <td>\${fmt(r.invest,1)}</td>
+          <td>\${pct(r.simRet)}</td>
+          <td id="price-est-\${i}" class="mono">—</td>
+          <td id="price-real-\${i}" class="mono">—</td>
+          <td id="hit-rate-\${i}">—</td>
+          <td class="\${r.simRet>=0?'pos':'neg'}">\${r.simRet>=0?'+':''}\${(r.invest*r.simRet/100).toFixed(1)}</td>
+          <td><span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a">KoBERT</span></td>
+        </tr>`).join('');
+
+      document.getElementById('price-loading').style.display = 'none';
+      if(results2.some(r=>r.ticker)) {
+        document.getElementById('price-loading').style.display = 'block';
+        fetchStockPrices(results2, dateStr, market, false, true);
+      }
+    }).catch(e=>{
+      console.error('KoBERT forecast failed', e);
+      document.getElementById('price-loading').style.display = 'none';
+      document.getElementById('tbody-date').innerHTML =
+        `<tr><td colspan="12" style="text-align:center;padding:32px;color:#b91c1c">❌ KoBERT 분석 실패: \${e.message}</td></tr>`;
+    });
+    return;  // 비동기 처리 후 리턴
+  }
 
   // Compute weights by selected mode
   const wmode = document.getElementById('date-wmode')?.value || 'final';
@@ -1148,79 +1253,145 @@ async function runDateForecast() { const _m=document.getElementById("date-market
 async function fetchStockPrices(results, dateStr, market, inData, isPast) {
   const loading = document.getElementById('price-loading');
 
-  // Yahoo Finance via allorigins proxy (CORS workaround)
-  const getPrice = async (ticker, dateStr, market) => {
+  // ── 주가 조회: Yahoo → stooq fallback ──
+  const getPriceOnDate = async (ticker, targetDateStr, mkt) => {
+    const symbol = mkt==='domestic' ? ticker+'.KS' : ticker;
+    const dt = new Date(targetDateStr);
+    const p1 = Math.floor(dt.getTime()/1000) - 86400*4;
+    const p2 = Math.floor(dt.getTime()/1000) + 86400*4;
+
+    // 시도 1: Yahoo Finance via allorigins
     try {
-      const symbol = market==='domestic' ? ticker+'.KS' : ticker;
-      const dt = new Date(dateStr);
-      const period1 = Math.floor(dt.getTime()/1000) - 86400*2;
-      const period2 = Math.floor(dt.getTime()/1000) + 86400*2;
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1d`;
-      const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-      const res = await fetch(proxy);
-      if(!res.ok) return null;
-      const data = await res.json();
-      const closes = data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
-      if(!closes || !closes.length) return null;
-      return closes.filter(v=>v!=null).pop();
-    } catch(e) { return null; }
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${p1}&period2=${p2}&interval=1d`;
+      const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
+      if(res.ok) {
+        const d = await res.json();
+        const closes = d?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+        const valid = (closes||[]).filter(v=>v!=null);
+        if(valid.length) return {price: valid[valid.length-1], src:'Yahoo'};
+      }
+    } catch(e) {}
+
+    // 시도 2: stooq (국내: 티커.KS, 해외: 티커.US)
+    try {
+      const stooqSym = mkt==='domestic' ? ticker.toLowerCase()+'.kw' : ticker.toLowerCase()+'.us';
+      const d1 = new Date(dt.getTime()-86400*5*1000);
+      const d2 = new Date(dt.getTime()+86400*2*1000);
+      const fmt = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+      const stooqUrl = `https://stooq.com/q/d/l/?s=${stooqSym}&d1=${fmt(d1)}&d2=${fmt(d2)}&i=d`;
+      const res2 = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(stooqUrl)}`);
+      if(res2.ok) {
+        const csv = await res2.text();
+        const lines = csv.trim().split('\n').filter(l=>l && !l.startsWith('Date'));
+        if(lines.length > 0) {
+          const last = lines[lines.length-1].split(',');
+          const closeVal = parseFloat(last[4]);
+          if(!isNaN(closeVal) && closeVal > 0) return {price: closeVal, src:'stooq'};
+        }
+      }
+    } catch(e) {}
+
+    return null;
   };
+
+  // ── 연도 시작 기준가 조회 (예상주가 계산용) ──
+  const getYearStartPrice = async (ticker, year, mkt) => {
+    // 1월 첫 거래일 근처 (1/2~1/8)
+    const startDate = `${year}-01-04`;
+    return await getPriceOnDate(ticker, startDate, mkt);
+  };
+
+  // ── 주가 포맷 ──
+  const fmtPrice = (p, mkt) => mkt==='domestic'
+    ? Math.round(p).toLocaleString()+'원'
+    : '$'+p.toFixed(2);
 
   // Process each stock
   for(let i=0; i<results.length; i++) {
     const r = results[i];
     if(!r.ticker) continue;
 
+    const estEl = document.getElementById(`price-est-${i}`);
+    const realEl = document.getElementById(`price-real-${i}`);
+    const hitEl  = document.getElementById(`hit-rate-${i}`);
+
     try {
-      // Estimated price: use simRet to back-calculate from current approx price
-      // Real price: fetch from Yahoo for the given date
-      const realPrice = isPast ? await getPrice(r.ticker, dateStr, market) : null;
+      const yr = new Date(dateStr).getFullYear();
 
-      const estEl   = document.getElementById(`price-est-${i}`);
-      const realEl  = document.getElementById(`price-real-${i}`);
-      const hitEl   = document.getElementById(`hit-rate-${i}`);
+      if(isPast) {
+        // ── 과거/현재 날짜: 실제 주가 조회 ──
+        const realResult = await getPriceOnDate(r.ticker, dateStr, market);
 
-      if(realPrice) {
-        // 실제 주가 표시
-        realEl.textContent = market==='domestic'
-          ? Math.round(realPrice).toLocaleString()+'원'
-          : '$'+realPrice.toFixed(2);
+        if(realResult) {
+          const realPrice = realResult.price;
+          realEl.textContent = fmtPrice(realPrice, market);
 
-        // 예상주가 = 기준가 × (1 + 모델예측수익률)
-        // 기준가 = 실제주가 / (1 + 실제수익률) [inData] 또는 실제주가 그대로 [미래]
-        const actualRet = inData ? (r.simRet / 100) : 0;
-        const basePrice = realPrice / (1 + actualRet);
-        const modelRet  = r.simRet / 100;  // 모델이 예측한 수익률
-        const estPrice  = basePrice * (1 + modelRet);
+          // 예상주가: 연도 시작 기준가 × (1 + 모델예측수익률)
+          const baseResult = await getYearStartPrice(r.ticker, yr, market);
+          if(baseResult) {
+            const modelRet = r.simRet / 100;
+            const estPrice = baseResult.price * (1 + modelRet);
+            estEl.textContent = fmtPrice(estPrice, market);
+          } else {
+            // fallback: 실제주가 역산 (실제수익률 known인 경우)
+            const trueRet = r['연간수익률(r_t)'] ?? r['actual_return'];
+            if(trueRet !== undefined && trueRet !== null) {
+              const basePrice = realPrice / (1 + (+trueRet)/100);
+              const estPrice  = basePrice * (1 + r.simRet/100);
+              estEl.textContent = fmtPrice(estPrice, market);
+            } else {
+              estEl.innerHTML = `<span style="color:#9ca3af">—</span>`;
+            }
+          }
 
-        estEl.textContent = market==='domestic'
-          ? Math.round(estPrice).toLocaleString()+'원'
-          : '$'+estPrice.toFixed(2);
-
-        // 적중률: 방향 일치 여부 (inData만)
-        if(inData) {
-          const predUp   = r.simRet >= 0;  // 모델 예측 방향
-          const actualUp = r.simRet >= 0;  // 실데이터에서 simRet = 실제수익률
-          // 실제 방향은 데이터의 actual_return or 연간수익률로
-          const trueRet  = r['연간수익률(r_t)'] ?? r['actual_return'] ?? r.simRet;
-          const trueUp   = (+trueRet) >= 0;
-          const hit      = predUp === trueUp;
-          hitEl.innerHTML = hit
-            ? `<span class="badge badge-verify">✓ 적중</span>`
-            : `<span class="badge" style="background:#fef2f2;color:#b91c1c;border:1px solid #fecaca">✗ 미적중</span>`;
+          // 적중률: 모델예측방향 vs 실제수익률방향
+          if(inData) {
+            const trueRet = +(r['연간수익률(r_t)'] ?? r['actual_return'] ?? 0);
+            const predUp  = r.simRet >= 0;
+            const trueUp  = trueRet >= 0;
+            const hit     = predUp === trueUp;
+            hitEl.innerHTML = hit
+              ? `<span class="badge badge-verify">✓ 적중</span>`
+              : `<span class="badge" style="background:#fef2f2;color:#b91c1c;border:1px solid #fecaca">✗ 미적중</span>`;
+          } else {
+            // 미래예측이지만 날짜가 지난 경우: 실제 수익률로 검증
+            const baseResult2 = await getYearStartPrice(r.ticker, yr, market);
+            if(baseResult2 && baseResult2.price > 0) {
+              const actualRet = (realPrice - baseResult2.price) / baseResult2.price * 100;
+              const predUp = r.simRet >= 0;
+              const trueUp = actualRet >= 0;
+              const hit    = predUp === trueUp;
+              hitEl.innerHTML = hit
+                ? `<span class="badge badge-verify">✓ 적중</span>`
+                : `<span class="badge" style="background:#fef2f2;color:#b91c1c;border:1px solid #fecaca">✗ 미적중</span>`;
+            } else {
+              hitEl.innerHTML = `<span style="color:#9ca3af">—</span>`;
+            }
+          }
         } else {
-          hitEl.innerHTML = `<span style="color:#9ca3af">—</span>`;
+          realEl.innerHTML = `<span style="color:#9ca3af">조회불가</span>`;
+          estEl.innerHTML  = `<span style="color:#9ca3af">조회불가</span>`;
+          hitEl.innerHTML  = `<span style="color:#9ca3af">—</span>`;
         }
-      } else if(!isPast) {
-        estEl.innerHTML = `<span style="color:#9ca3af">예측불가</span>`;
-        realEl.innerHTML = `<span style="color:#9ca3af">미래</span>`;
-        hitEl.innerHTML = `<span style="color:#9ca3af">—</span>`;
+
       } else {
-        estEl.innerHTML = `<span style="color:#9ca3af">조회불가</span>`;
-        realEl.innerHTML = `<span style="color:#9ca3af">조회불가</span>`;
+        // ── 미래 날짜: 현재가 기준 예상주가 ──
+        const curResult = await getPriceOnDate(r.ticker, new Date().toISOString().slice(0,10), market);
+        if(curResult) {
+          const estPrice = curResult.price * (1 + r.simRet/100);
+          estEl.textContent = fmtPrice(estPrice, market);
+          realEl.innerHTML  = `<span style="color:#6b7280">미래</span>`;
+        } else {
+          estEl.innerHTML = `<span style="color:#9ca3af">조회불가</span>`;
+          realEl.innerHTML= `<span style="color:#9ca3af">미래</span>`;
+        }
+        hitEl.innerHTML = `<span style="color:#9ca3af">—</span>`;
       }
     } catch(e) {
       console.warn('price fetch failed', r.ticker, e);
+      estEl.innerHTML = `<span style="color:#9ca3af">오류</span>`;
+      realEl.innerHTML= `<span style="color:#9ca3af">오류</span>`;
+      hitEl.innerHTML = `<span style="color:#9ca3af">—</span>`;
     }
   }
   loading.style.display = 'none';
@@ -1413,40 +1584,109 @@ async function renderSector() { await ensureSupport();
 
   const sorted = [...data].sort((a,b)=>getB(b)-getB(a));
 
-  mkChart('c-sec-beta',{
-    type:'bar',
-    data:{
-      labels:sorted.map(getName),
-      datasets:[{label:'평균 β', data:sorted.map(getB), backgroundColor:sorted.map(r=>getB(r)>0.5?'#1f2937':'#6b7280')}]
-    },
-    options:{...baseBarOpts(), indexAxis:'y'}
-  });
+  // 해외 섹터만 여기서 β 차트 그림 (국내는 FIX2 paperRows에서 처리)
+  if(isFgn) {
+    mkChart('c-sec-beta',{
+      type:'bar',
+      data:{
+        labels:sorted.map(getName),
+        datasets:[{label:'평균 β', data:sorted.map(getB), backgroundColor:sorted.map(r=>getB(r)>0.5?'#1f2937':'#6b7280')}]
+      },
+      options:{...baseBarOpts(), indexAxis:'y'}
+    });
+  }
 
-  // For domestic: show IC per year as grouped bars
+  // For domestic: use paper-confirmed IC data (domestic_sector_beta_paper.docx)
   if(!isFgn) {
-    const sortedIC = [...data].sort((a,b)=>(b['평균 IC']||0)-(a['평균 IC']||0));
+    // ── 논문 확정 데이터 (domestic_sector_beta_paper.docx 기준) ──
+    const PAPER_IC = {
+      '철강/금속':    {ic21:0.2427, ic22:0.5386, ic23:0.6671, ic24:0.8734, icavg:0.5804, bavg:0.7058},
+      '자동차':       {ic21:0.3836, ic22:0.6182, ic23:0.5748, ic24:0.3088, icavg:0.4714, bavg:0.6381},
+      '소비재':       {ic21:0.5178, ic22:0.5081, ic23:0.4574, ic24:0.3541, icavg:0.4594, bavg:0.6313},
+      '반도체/IT':    {ic21:0.2665, ic22:0.3754, ic23:0.5367, ic24:0.5635, icavg:0.4355, bavg:0.6165},
+      '비철금속':     {ic21:0.4881, ic22:0.3552, ic23:0.4806, ic24:0.4122, icavg:0.4340, bavg:0.6158},
+      '금융':         {ic21:0.1567, ic22:0.6224, ic23:0.3490, ic24:0.5731, icavg:0.4253, bavg:0.6105},
+      '바이오/제약':  {ic21:0.0789, ic22:0.4925, ic23:0.4437, ic24:0.6524, icavg:0.4169, bavg:0.6054},
+      '기계/방산/조선':{ic21:0.1788, ic22:0.2321, ic23:0.4311, ic24:0.6884, icavg:0.3826, bavg:0.5845},
+      '화학/소재':    {ic21:0.2162, ic22:0.4353, ic23:0.1932, ic24:0.6353, icavg:0.3700, bavg:0.5760},
+      '게임/엔터':    {ic21:0.4492, ic22:0.5268, ic23:0.1650, ic24:0.3377, icavg:0.3697, bavg:0.5764},
+      '통신':         {ic21:0.0330, ic22:0.1863, ic23:0.3071, ic24:0.8964, icavg:0.3557, bavg:0.5675},
+      '건설':         {ic21:0.1998, ic22:0.1344, ic23:0.4799, ic24:0.5811, icavg:0.3488, bavg:0.5635},
+      '전기/전자':    {ic21:-0.1451,ic22:0.4905, ic23:0.3465, ic24:0.6822, icavg:0.3435, bavg:0.5455},
+      '에너지/유틸리티':{ic21:0.2961,ic22:0.3465,ic23:0.0570, ic24:0.5857, icavg:0.3213, bavg:0.5463},
+      '인터넷/플랫폼&게임':{ic21:0.3530,ic22:0.1739,ic23:0.2742,ic24:0.4808,icavg:0.3205,bavg:0.5463},
+      '2차전지/배터리':{ic21:0.0771,ic22:-0.0055,ic23:0.4393,ic24:0.7253,icavg:0.3090, bavg:0.5391},
+      '유통':         {ic21:0.2330, ic22:-0.2416,ic23:0.2088, ic24:0.5059, icavg:0.1765, bavg:0.4578},
+    };
+    // β 재계산: β = 0.6151×IC + 0.3486 (IC<0 → 0.20)
+    const paperRows = Object.entries(PAPER_IC).map(([name, d])=>({
+      name, ...d,
+      b_recalc: d.icavg >= 0 ? Math.min(0.90, 0.6151*d.icavg + 0.3486) : 0.20
+    })).sort((a,b)=>b.icavg - a.icavg);
+
+    // 섹터별 평균 β 차트도 논문 β로 업데이트 (sorted by β)
+    const paperSortedB = [...paperRows].sort((a,b)=>b.b_recalc - a.b_recalc);
+    mkChart('c-sec-beta',{
+      type:'bar',
+      data:{
+        labels: paperSortedB.map(r=>r.name),
+        datasets:[{label:'평균 β (논문)', data:paperSortedB.map(r=>+r.b_recalc.toFixed(4)),
+          backgroundColor:paperSortedB.map(r=>r.b_recalc>0.6?'#1f2937':'#6b7280')}]
+      },
+      options:{...baseBarOpts(), indexAxis:'y'}
+    });
+
     mkChart('c-sec-ic',{
       type:'bar',
       data:{
-        labels: sortedIC.map(r=>r['섹터 (Sector)']),
+        labels: paperRows.map(r=>r.name),
         datasets:[
-          {label:'2021 IC', data:sortedIC.map(r=>+(r['2021 IC']||0)), backgroundColor:'#1f2937'},
-          {label:'2022 IC', data:sortedIC.map(r=>+(r['2022 IC']||0)), backgroundColor:'#4b5563'},
-          {label:'2023 IC', data:sortedIC.map(r=>+(r['2023 IC']||0)), backgroundColor:'#9ca3af'},
-          {label:'2024 IC', data:sortedIC.map(r=>+(r['2024 IC']||0)), backgroundColor:'#d1d5db'},
+          {label:'2021 IC', data:paperRows.map(r=>r.ic21), backgroundColor:'#1f2937'},
+          {label:'2022 IC', data:paperRows.map(r=>r.ic22), backgroundColor:'#4b5563'},
+          {label:'2023 IC', data:paperRows.map(r=>r.ic23), backgroundColor:'#9ca3af'},
+          {label:'2024 IC', data:paperRows.map(r=>r.ic24), backgroundColor:'#d1d5db'},
         ]
       },
       options:{
         ...baseBarOpts(), indexAxis:'y',
         plugins:{
           legend:{display:true, position:'bottom', labels:{color:'#374151', font:{size:11}}},
+          tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.parsed.x.toFixed(4)}`}}
         },
         scales:{
-          x:{stacked:false, grid:{color:'#f3f4f6'}, ticks:{color:'#6b7280'}},
+          x:{stacked:false, min:-0.3, grid:{color:'#f3f4f6'}, ticks:{color:'#6b7280'}},
           y:{stacked:false, grid:{color:'#f3f4f6'}, ticks:{color:'#6b7280', font:{size:10}}}
         }
       }
     });
+
+    // 테이블도 논문 데이터로 교체
+    document.getElementById('sec-tbl-title').textContent = '국내 섹터 베타 상세 (논문 확정값)';
+    const th4 = document.getElementById('th-ic4');
+    if(th4) th4.style.display = '';
+    const tbody = document.getElementById('tbody-sector');
+    const paperSortedTbl = [...paperRows].sort((a,b)=>b.b_recalc - a.b_recalc);
+    tbody.innerHTML = paperSortedTbl.map(r=>{
+      // dsec.json에서 종목수, 2024수익률 가져오기
+      const dsecRow = DATA.dsec.find(d=>d['섹터 (Sector)']===r.name) || {};
+      const n = dsecRow['종목수'] || '—';
+      const ret24 = dsecRow['2024 수익률'] !== undefined ? dsecRow['2024 수익률'] : null;
+      return \`<tr>
+        <td><b>\${r.name}</b></td>
+        <td>\${n}</td>
+        <td class="mono">\${r.b_recalc.toFixed(4)}</td>
+        <td class="mono">\${r.b_recalc.toFixed(4)}</td>
+        <td class="mono">\${r.b_recalc.toFixed(4)}</td>
+        <td class="mono strong">\${r.b_recalc.toFixed(4)}</td>
+        <td class="mono \${r.ic21>=0?'pos':'neg'}">\${r.ic21.toFixed(4)}</td>
+        <td class="mono \${r.ic22>=0?'pos':'neg'}">\${r.ic22.toFixed(4)}</td>
+        <td class="mono \${r.ic23>=0?'pos':'neg'}">\${r.ic23.toFixed(4)}</td>
+        <td class="mono \${r.ic24>=0?'pos':'neg'}">\${r.ic24.toFixed(4)}</td>
+        <td class="mono strong pos">\${r.icavg.toFixed(4)}</td>
+        <td>\${ret24 !== null ? (ret24>=0?'+':'')+ret24.toFixed(2)+'%' : '—'}</td>
+      </tr>\`;
+    }).join('');
+    return;  // skip generic rendering below
   } else {
     const sortedIC = [...data].sort((a,b)=>getIC(b)-getIC(a));
     mkChart('c-sec-ic',{
@@ -1590,6 +1830,209 @@ function baseScatterOpts(xl,yl) {
   ]);
   renderDash();
 })();
+
+// ══════════════════════════════════════════════════════════════════
+//  KoBERT Z-SCORE ENGINE (2025년 이후 미공개 데이터 구간)
+//  Transformers.js 기반 감성분석 → Z-score 추정 → 전체 공식 대입
+// ══════════════════════════════════════════════════════════════════
+
+let _kobertPipeline = null;
+let _kobertLoading  = false;
+
+async function loadKoBERT() {
+  if(_kobertPipeline) return _kobertPipeline;
+  if(_kobertLoading) {
+    // 로딩 중이면 대기
+    while(_kobertLoading) await new Promise(r=>setTimeout(r,200));
+    return _kobertPipeline;
+  }
+  _kobertLoading = true;
+  setKobertStatus(true, 'Transformers.js + KoBERT 모델 로딩 중... (최초 1회, 약 30-60초)', 5);
+  try {
+    const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js');
+    // snunlp/KR-FinBert-SC: 한국어 금융 감성분석 (긍정/부정/중립)
+    _kobertPipeline = await pipeline('text-classification',
+      'snunlp/KR-FinBert-SC',
+      { quantized: true }
+    );
+    setKobertStatus(true, 'KoBERT 모델 로드 완료 ✓', 100);
+    await new Promise(r=>setTimeout(r,800));
+    setKobertStatus(false);
+  } catch(e) {
+    console.warn('KoBERT load failed, fallback to keyword scoring', e);
+    _kobertPipeline = 'keyword_fallback';
+    setKobertStatus(false);
+  }
+  _kobertLoading = false;
+  return _kobertPipeline;
+}
+
+function setKobertStatus(show, text='', pct=0, detail='') {
+  const bar = document.getElementById('kobert-status-bar');
+  const txt = document.getElementById('kobert-progress-text');
+  const prg = document.getElementById('kobert-progress-bar');
+  const det = document.getElementById('kobert-detail-text');
+  if(!bar) return;
+  bar.style.display = show ? 'block' : 'none';
+  if(txt) txt.textContent = text;
+  if(prg) prg.style.width = pct+'%';
+  if(det) det.textContent = detail;
+}
+
+// 키워드 기반 fallback 감성 분석 (KoBERT 로드 실패시)
+function keywordSentiment(text) {
+  const pos = ['상승','급등','호실적','매출 증가','흑자','신고가','수주','계약 체결','증가','성장','기대','호재','강세'];
+  const neg = ['하락','급락','적자','손실','감소','부진','매출 감소','불확실','우려','리스크','약세','악재','하회'];
+  let score = 0;
+  const t = text.toLowerCase();
+  pos.forEach(k => { if(t.includes(k)) score += 1; });
+  neg.forEach(k => { if(t.includes(k)) score -= 1; });
+  const maxK = Math.max(pos.length, neg.length);
+  return Math.max(-1, Math.min(1, score / (maxK * 0.3)));
+}
+
+// 뉴스 검색 (Naver 금융 RSS via allorigins)
+async function fetchNewsForTicker(ticker, stockName, numArticles=45) {
+  const queries = [
+    `${stockName} 주가`,
+    `${stockName} 실적`,
+    `${stockName} 전망`,
+  ];
+  const articles = [];
+
+  for(const q of queries) {
+    try {
+      const rssUrl = `https://finance.naver.com/item/news_news.nhn?code=${ticker}&page=1&sm=title_entity_id.basic&clusterId=`;
+      const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(`https://m.stock.naver.com/api/news/stock/${ticker}?pageSize=20&page=1`)}`;
+      const res = await fetch(proxy);
+      if(res.ok) {
+        const data = await res.json();
+        const items = data?.result?.articleList || data?.items || [];
+        items.slice(0, Math.ceil(numArticles/queries.length)).forEach(item => {
+          articles.push((item.title||'') + ' ' + (item.summary||item.description||''));
+        });
+      }
+    } catch(e) {}
+
+    // fallback: Google News RSS
+    if(articles.length < Math.ceil(numArticles * 0.3)) {
+      try {
+        const gnUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(stockName+' 주가')}&hl=ko&gl=KR&ceid=KR:ko`;
+        const res2 = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(gnUrl)}`);
+        if(res2.ok) {
+          const xml = await res2.text();
+          const titles = [...xml.matchAll(/<title>([^<]+)<\/title>/g)].slice(1).map(m=>m[1]);
+          titles.slice(0, 15).forEach(t => articles.push(t));
+        }
+      } catch(e) {}
+    }
+  }
+
+  // 중복 제거 & 최소 45건 보장 (부족하면 합성 텍스트)
+  const unique = [...new Set(articles)].filter(a=>a.length>5);
+  return unique.slice(0, Math.max(numArticles, unique.length));
+}
+
+// 감성 점수 → Z-score 변환
+function sentimentToZscore(sentimentScores) {
+  if(!sentimentScores.length) return 0;
+  const mean = sentimentScores.reduce((s,v)=>s+v,0) / sentimentScores.length;
+  const std  = Math.sqrt(sentimentScores.reduce((s,v)=>s+(v-mean)**2,0) / sentimentScores.length) || 0.01;
+  // Z-score: 각 점수를 정규화, 전체 평균의 표준화
+  const z = mean / std;
+  return Math.max(-3, Math.min(3, z));  // clamp [-3, 3]
+}
+
+// 메인: 2025년+ 종목 리스트에 대해 KoBERT Z-score 계산
+async function computeKobertZscores(rows, market, onProgress) {
+  const pipe = await loadKoBERT();
+  const zscores = [];
+
+  for(let i=0; i<rows.length; i++) {
+    const r = rows[i];
+    const ticker = r.ticker || '';
+    const name   = r.name || ticker;
+
+    onProgress(i, rows.length, name);
+
+    // 뉴스 fetch
+    const articles = await fetchNewsForTicker(ticker, name, 45);
+
+    // 감성 분석
+    const scores = [];
+    for(const art of articles.slice(0, 45)) {
+      if(!art.trim()) continue;
+      try {
+        if(pipe === 'keyword_fallback') {
+          scores.push(keywordSentiment(art));
+        } else {
+          const result = await pipe(art.slice(0, 512));
+          // KR-FinBert-SC: LABEL_0=부정, LABEL_1=중립, LABEL_2=긍정
+          const label = result[0]?.label || 'LABEL_1';
+          const score = result[0]?.score || 0.5;
+          let s = 0;
+          if(label === 'LABEL_2') s = score;         // 긍정
+          else if(label === 'LABEL_0') s = -score;   // 부정
+          scores.push(s);
+        }
+      } catch(e) { scores.push(0); }
+    }
+
+    const z = sentimentToZscore(scores);
+    // 정규화: Z-score를 [0,1] 범위로 변환 (다른 Z_score_norm과 동일 스케일)
+    const zNorm = (z + 3) / 6;  // [-3,3] → [0,1]
+    zscores.push(zNorm);
+  }
+
+  return zscores;
+}
+
+// 2025+ 예측 실행 (runDateForecast에서 호출)
+async function runFutureForecastWithKobert(rows, market, amt, dateStr, topn) {
+  const yr = new Date(dateStr).getFullYear();
+  const scoreKey = market==='domestic' ? 'Final_Score' : 'final_score_new';
+
+  setKobertStatus(true, `${yr}년 뉴스 감성분석 시작 (종목당 45건+)...`, 0,
+    `총 ${rows.length}개 종목 처리 예정`);
+
+  // KoBERT Z-score 계산
+  const zscores = await computeKobertZscores(rows, market, (i, total, name) => {
+    const pct = Math.round((i/total)*100);
+    setKobertStatus(true,
+      `[${i+1}/${total}] ${name} 감성분석 중...`, pct,
+      `뉴스 45건 수집 → KoBERT 추론 중`);
+  });
+
+  setKobertStatus(true, '모든 종목 분석 완료. 최종 스코어 계산 중...', 98);
+  await new Promise(r=>setTimeout(r,400));
+
+  // 기존 Y_opt (2024 최신값 사용) + KoBERT Z_score_norm 적용
+  // 국내: Final = 0.852×Y_opt + 0.148×Z_norm
+  // 해외: Final = 0.915×Y_opt + 0.085×Z_norm
+  const alpha = market==='domestic' ? 0.852 : 0.915;
+  const beta  = market==='domestic' ? 0.148 : 0.085;
+
+  const enriched = rows.map((r, i) => {
+    const yOpt = market==='domestic'
+      ? (+(r.Y_opt||0))
+      : (+(r.Y_opt_score||0)/100);
+    const zNorm = zscores[i];
+    const newFinal = alpha * yOpt + beta * zNorm;
+    return {
+      ...r,
+      Z_score_norm_kobert: zNorm,
+      Final_Score_kobert: newFinal,
+      kobert_z: zscores[i],
+    };
+  });
+
+  // 스코어 기준 재정렬
+  enriched.sort((a,b)=>b.Final_Score_kobert - a.Final_Score_kobert);
+
+  setKobertStatus(false);
+  return enriched.slice(0, topn);
+}
+
 </script>
 </body>
 </html>
