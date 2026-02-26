@@ -571,7 +571,7 @@
 
 <script>
 // ══════════════════════════════════════════════════════
-//  DATA  —  loaded async from /nps_site/data/*.json
+//  DATA  —  loaded async from /data/*.json
 // ══════════════════════════════════════════════════════
 const DATA = { domestic:[], foreign:[], zscore:[], fsec_raw:[], fsec:[], dsec:[] };
 let _loaded = {};
@@ -628,7 +628,7 @@ async function loadDomesticYear(yr) {
   const key = `dom${yr}`;
   if(_loaded[key]) return;
   try {
-    const res = await fetch(`nps_site/data/domestic_${yr}.json`);
+    const res = await fetch(`data/domestic_${yr}.json`);
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
     DATA.domestic = DATA.domestic.filter(r=>+r.year!==+yr).concat(json);
@@ -646,7 +646,7 @@ async function loadDomesticYear(yr) {
 
 async function ensureYear(yr, market) {
   if(market==='foreign') {
-    if(!_loaded['foreign']) await loadData('foreign','nps_site/data/foreign.json');
+    if(!_loaded['foreign']) await loadData('foreign','data/foreign.json');
   } else {
     await loadDomesticYear(yr);
   }
@@ -654,9 +654,9 @@ async function ensureYear(yr, market) {
 
 async function ensureSupport() {
   const tasks = [];
-  if(!_loaded['zscore']) tasks.push(loadData('zscore','nps_site/data/zscore.json'));
-  if(!_loaded['fsec'])   tasks.push(loadData('fsec','nps_site/data/fsec.json'));
-  if(!_loaded['dsec'])   tasks.push(loadData('dsec','nps_site/data/dsec.json'));
+  if(!_loaded['zscore']) tasks.push(loadData('zscore','data/zscore.json'));
+  if(!_loaded['fsec'])   tasks.push(loadData('fsec','data/fsec.json'));
+  if(!_loaded['dsec'])   tasks.push(loadData('dsec','data/dsec.json'));
   await Promise.all(tasks);
 }
 
@@ -1052,7 +1052,7 @@ function computeWeights(rows, wmode, market, sectorData) {
   return scores.map(v=>Math.max(v,0)/tot);
 }
 
-async function runDateForecast() { const _m=document.getElementById("date-market").value; const _y=new Date(document.getElementById("date-from").value).getFullYear(); if(_m==="domestic") await loadDomesticYear(_y); else await loadData("foreign","nps_site/data/foreign.json");
+async function runDateForecast() { const _m=document.getElementById("date-market").value; const _y=new Date(document.getElementById("date-from").value).getFullYear(); if(_m==="domestic") await loadDomesticYear(_y); else await loadData("foreign","data/foreign.json");
   const dateStr = document.getElementById('date-from').value;
   const market  = document.getElementById('date-market').value;
   const topn    = +document.getElementById('date-topn').value;
@@ -1358,7 +1358,7 @@ async function fetchStockPrices(results, dateStr, market, inData, isPast) {
 // ══════════════════════════════════════════════════════
 //  SIMULATOR
 // ══════════════════════════════════════════════════════
-async function renderSim() { const sv=document.getElementById("sim-year").value; const isFgn2=sv.startsWith("fgn"); const yr2=isFgn2?+sv.replace("fgn",""):+sv; if(isFgn2) await loadData("foreign","nps_site/data/foreign.json"); else await loadDomesticYear(yr2);
+async function renderSim() { const sv=document.getElementById("sim-year").value; const isFgn2=sv.startsWith("fgn"); const yr2=isFgn2?+sv.replace("fgn",""):+sv; if(isFgn2) await loadData("foreign","data/foreign.json"); else await loadDomesticYear(yr2);
   const simYr  = document.getElementById('sim-year').value;
   const amt    = +document.getElementById('sim-amt').value;
   const n      = +document.getElementById('sim-n').value;
@@ -1671,7 +1671,7 @@ async function renderSector() { await ensureSupport();
 // ══════════════════════════════════════════════════════
 //  DATA VIEWER
 // ══════════════════════════════════════════════════════
-async function renderDataViewer() { const _ds=document.getElementById("data-ds").value; const _yr=document.getElementById("data-year").value; if(_ds==="domestic"&&_yr!=="all") await loadDomesticYear(+_yr); else if(_ds==="domestic") {for(const y of [2021,2022,2023,2024]) await loadDomesticYear(y);} else if(_ds==="foreign") await loadData("foreign","nps_site/data/foreign.json"); else if(_ds==="zscore") await loadData("zscore","nps_site/data/zscore.json"); else if(_ds==="fsec") await loadData("fsec","nps_site/data/fsec.json"); else if(_ds==="dsec") await loadData("dsec","nps_site/data/dsec.json");
+async function renderDataViewer() { const _ds=document.getElementById("data-ds").value; const _yr=document.getElementById("data-year").value; if(_ds==="domestic"&&_yr!=="all") await loadDomesticYear(+_yr); else if(_ds==="domestic") {for(const y of [2021,2022,2023,2024]) await loadDomesticYear(y);} else if(_ds==="foreign") await loadData("foreign","data/foreign.json"); else if(_ds==="zscore") await loadData("zscore","data/zscore.json"); else if(_ds==="fsec") await loadData("fsec","data/fsec.json"); else if(_ds==="dsec") await loadData("dsec","data/dsec.json");
   const ds     = document.getElementById('data-ds').value;
   const yr     = document.getElementById('data-year').value;
   const search = document.getElementById('data-search').value.toLowerCase();
@@ -1756,7 +1756,7 @@ function baseScatterOpts(xl,yl) {
   await Promise.all([
     loadDomesticYear(2024),
     loadDomesticYear(2023),
-    loadData('foreign','nps_site/data/foreign.json'),
+    loadData('foreign','data/foreign.json'),
     ensureSupport()
   ]);
   renderDash();
