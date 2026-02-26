@@ -564,6 +564,7 @@ async function loadData(key, url) {
   if(_loaded[key]) return;
   try {
     const res = await fetch(url);
+    if(!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
     const json = await res.json();
     if(key==='domestic_all') {
       DATA.domestic = json;
@@ -594,29 +595,32 @@ async function loadData(key, url) {
       DATA.dsec = json;
     }
     _loaded[key] = true;
-  } catch(e) { console.error('fetch error', key, e); }
-}
-
-async function ensureDomestic(yr) {
-  const key = 'dom_'+yr;
-  if(!_loaded[key]) {
-    await loadData('domestic_all', `data/domestic_${yr}.json`);
-    _loaded[key]=true;
-    // merge into DATA.domestic (replace same year)
-    DATA.domestic = DATA.domestic.filter(r=>+r.year!==+yr);
-    const loaded = DATA[`_dom${yr}`] || [];
-    // re-fetch properly
+  } catch(e) {
+    console.error('fetch error', key, url, e);
+    document.body.insertAdjacentHTML('afterbegin',
+      `<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#b91c1c;color:#fff;padding:10px 16px;font-size:13px;font-family:monospace">
+        ❌ 데이터 로드 실패: ${url} — ${e.message} (GitHub Pages라면 상대경로 확인)
+      </div>`);
   }
 }
 
-// Better: load each year into DATA.domestic accumulator
+// load each year into DATA.domestic accumulator
 async function loadDomesticYear(yr) {
   const key = `dom${yr}`;
   if(_loaded[key]) return;
-  const res  = await fetch(`data/domestic_${yr}.json`);
-  const json = await res.json();
-  DATA.domestic = DATA.domestic.filter(r=>+r.year!==+yr).concat(json);
-  _loaded[key] = true;
+  try {
+    const res = await fetch(`data/domestic_${yr}.json`);
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    DATA.domestic = DATA.domestic.filter(r=>+r.year!==+yr).concat(json);
+    _loaded[key] = true;
+  } catch(e) {
+    console.error('loadDomesticYear failed', yr, e);
+    document.body.insertAdjacentHTML('afterbegin',
+      `<div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#b91c1c;color:#fff;padding:10px 16px;font-size:13px;font-family:monospace">
+        ❌ domestic_${yr}.json 로드 실패 — ${e.message}
+      </div>`);
+  }
 }
 
 async function ensureYear(yr, market) {
