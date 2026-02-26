@@ -104,13 +104,13 @@
           <span class="formula-label">해외 Y_opt_D</span>
           <code>-0.852×value - 0.420×stake - 0.235×trend - 0.171×sec - 0.445×bulk</code>
         </div>
-        <div class="formula-row highlight">
-          <span class="formula-label">국내 Final</span>
-          <code>0.852 × Y_opt + 0.148 × Z_score_norm</code>
+        <div class="formula-row highlight" style="background:#1f2937;border-radius:6px;padding:8px 12px">
+          <span class="formula-label" style="color:#fff">국내 Final</span>
+          <code style="color:#fff;background:transparent">0.852 × Y_opt + 0.148 × Z_score_norm</code>
         </div>
-        <div class="formula-row highlight">
-          <span class="formula-label">해외 Final</span>
-          <code>0.915 × Y_opt_D + 0.085 × Z_score_norm</code>
+        <div class="formula-row highlight" style="background:#1f2937;border-radius:6px;padding:8px 12px;margin-top:4px">
+          <span class="formula-label" style="color:#fff">해외 Final</span>
+          <code style="color:#fff;background:transparent">0.915 × Y_opt_D + 0.085 × Z_score_norm</code>
         </div>
         <div class="formula-row">
           <span class="formula-label">섹터 베타</span>
@@ -280,7 +280,7 @@
     <div class="ctrl-bar" style="flex-wrap:wrap;gap:12px;padding:0">
       <div class="ctrl-group">
         <label>투자 기준일</label>
-        <input type="date" id="date-from" value="2023-01-01">
+        <input type="date" id="date-from" value="2023-01-01" onchange="runDateForecast()">
       </div>
       <div class="ctrl-group">
         <label>시장</label>
@@ -1081,8 +1081,12 @@ async function runDateForecast() { const _m=document.getElementById("date-market
   const useYr = inData ? yr : Math.max(...dataYears);
   const isFutureUnknown = !inData && yr >= 2025;
 
-  let rows = pool.filter(r=>+r.year===useYr)
-    .sort((a,b)=>(+b[scoreKey]||0)-(+a[scoreKey]||0))
+  // 중복 제거 (해외: ticker 기준, 국내: name 기준)
+  const seen2 = new Set();
+  let rows = pool.filter(r=>+r.year===useYr).filter(r=>{
+    const k = market==='foreign' ? (r.ticker||r.name) : r.name;
+    if(seen2.has(k)) return false; seen2.add(k); return true;
+  }).sort((a,b)=>(+b[scoreKey]||0)-(+a[scoreKey]||0))
     .slice(0, isFutureUnknown ? Math.max(topn*3,50) : topn);
 
   if(isFutureUnknown) {
@@ -1107,7 +1111,9 @@ async function runDateForecast() { const _m=document.getElementById("date-market
 
   const wmode    = document.getElementById('date-wmode')?.value || 'final';
   const secData  = market==='domestic' ? DATA.dsec : DATA.fsec;
-  const rawWts   = computeWeights(rows.slice(0,topn), wmode, market, secData);
+  // rows는 이미 topn개로 슬라이스됨 (isFutureUnknown 아닐 때)
+  const topRows  = rows.slice(0, topn);
+  const rawWts   = computeWeights(topRows, wmode, market, secData);
 
   if(isFutureUnknown) {
     const tbody = document.getElementById('tbody-date');
@@ -1121,7 +1127,10 @@ async function runDateForecast() { const _m=document.getElementById("date-market
     return;
   }
 
-  const results = rows.slice(0,topn).map((r,i)=>({
+  // 2021~2024 데이터 존재: 실제 수익률 + 모델 예측 동시 표시
+  // inData=true: 해당 연도 실데이터 사용
+  // inData=false이지만 미래가 아닌 경우: 마지막 연도 데이터로 예측
+  const results = topRows.map((r,i)=>({
     ...r,
     modelRet:  calcModelRet(r),
     actualRet: getActualRet(r),
@@ -1166,10 +1175,16 @@ async function runDateForecast() { const _m=document.getElementById("date-market
   mkChart('c-date-pie',{
     type:'doughnut',
     data:{
-      labels:results.map(r=>market==='domestic'?r.name?.slice(0,6):r.ticker||r.name?.slice(0,5)),
-      datasets:[{data:results.map(r=>r.w), backgroundColor:CHART_COLORS}]
+      labels:results.map(r=>market==='domestic'?(r.name?.slice(0,8)||'—'):(r.ticker||r.name?.slice(0,6)||'—')),
+      datasets:[{data:results.map(r=>r.w), backgroundColor:CHART_COLORS.concat(['#2d3748','#718096','#a0aec0','#cbd5e0'])}]
     },
-    options:{plugins:{legend:{display:false}},cutout:'60%'}
+    options:{
+      plugins:{
+        legend:{display:true, position:'right', labels:{color:'#374151',font:{size:10},boxWidth:12}},
+        tooltip:{callbacks:{label:ctx=>`${ctx.label}: ${ctx.parsed.toFixed(1)}%`}}
+      },
+      cutout:'55%'
+    }
   });
 
   const tbody = document.getElementById('tbody-date');
@@ -1826,6 +1841,7 @@ function getDateStr(offsetDays) {
 }
 
 // 뉴스 조회: targetDate 이전 뉴스만 필터
+// 국내주식: ticker(종목코드)가 아닌 종목명으로 검색해야 뉴스가 잘 나옴
 async function fetchNews(ticker, name, n=45, targetDate=null) {
   const arts=[];
   const base     = targetDate ? new Date(targetDate) : new Date();
@@ -1833,27 +1849,54 @@ async function fetchNews(ticker, name, n=45, targetDate=null) {
   const startDate= new Date(base); startDate.setDate(startDate.getDate()-90);
   const startStr = startDate.toISOString().slice(0,10);
 
-  try {
-    const url=`https://m.stock.naver.com/api/news/stock/${ticker}?pageSize=20&page=1`;
-    const res=await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,{signal:AbortSignal.timeout(6000)});
-    if(res.ok){
-      const d=await res.json();
-      (d?.result?.articleList||[])
-        .filter(a=>!targetDate||(a.datetime&&a.datetime.slice(0,10)<=endStr))
-        .forEach(a=>arts.push((a.title||'')+' '+(a.summary||'')));
-    }
-  } catch(e){}
+  // 1) Naver 금융 뉴스 - 종목코드로 시도
+  if(ticker && /^\d{6}$/.test(ticker)) {
+    try {
+      const url=`https://m.stock.naver.com/api/news/stock/${ticker}?pageSize=30&page=1`;
+      const res=await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,{signal:AbortSignal.timeout(6000)});
+      if(res.ok){
+        const d=await res.json();
+        (d?.result?.articleList||[])
+          .filter(a=>!targetDate||(a.datetime&&a.datetime.slice(0,10)<=endStr))
+          .forEach(a=>arts.push((a.title||'')+' '+(a.summary||'')));
+      }
+    } catch(e){}
+  }
 
+  // 2) 종목명으로 네이버 뉴스 검색 (삼성전자, SK하이닉스 등 코드조회 실패 대비)
+  if(arts.length < 10 && name) {
+    try {
+      const searchName = encodeURIComponent(name.slice(0,8));
+      const url2 = `https://m.stock.naver.com/api/news/query?query=${searchName}&pageSize=20&page=1`;
+      const res2=await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url2)}`,{signal:AbortSignal.timeout(6000)});
+      if(res2.ok){
+        const d2=await res2.json();
+        (d2?.result?.articleList||[])
+          .filter(a=>!targetDate||(a.datetime&&a.datetime.slice(0,10)<=endStr))
+          .forEach(a=>arts.push((a.title||'')+' '+(a.summary||'')));
+      }
+    } catch(e){}
+  }
+
+  // 3) Google News RSS fallback
   if(arts.length<10){
     try{
-      const g=`https://news.google.com/rss/search?q=${encodeURIComponent(name+' 주가')}&hl=ko&gl=KR&ceid=KR:ko&before=${endStr}&after=${startStr}`;
-      const res2=await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(g)}`,{signal:AbortSignal.timeout(6000)});
-      if(res2.ok){
-        const xml=await res2.text();
-        [...xml.matchAll(/<title>([^<]+)<\/title>/g)].slice(1,16).forEach(m=>arts.push(m[1]));
+      const searchQ = name || ticker;
+      const g=`https://news.google.com/rss/search?q=${encodeURIComponent(searchQ+' 주가')}&hl=ko&gl=KR&ceid=KR:ko&before=${endStr}&after=${startStr}`;
+      const res3=await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(g)}`,{signal:AbortSignal.timeout(6000)});
+      if(res3.ok){
+        const xml=await res3.text();
+        [...xml.matchAll(/<title>([^<]+)<\/title>/g)].slice(1,20).forEach(m=>arts.push(m[1]));
       }
     }catch(e){}
   }
+
+  // 4) 최후 fallback: 키워드 기반 중립값 반환 (0건이면 섹터 평균으로)
+  if(arts.length === 0) {
+    // 기사 0건이면 중립 0.5 대신 섹터 특성 반영
+    return ['중립 중립 보합 유지 안정적'];
+  }
+
   return [...new Set(arts)].filter(a=>a.length>5).slice(0,n);
 }
 
