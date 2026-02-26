@@ -297,6 +297,16 @@
         <label>투자 금액 (만원)</label>
         <input type="number" id="date-amt" value="1000" min="10" step="100" style="width:120px">
       </div>
+      <div class="ctrl-group">
+        <label>배분 방식</label>
+        <select id="date-wmode">
+          <option value="final">최종값 (α+β 모두 적용)</option>
+          <option value="alpha_only">알파만 적용 (Y:Z 혼합)</option>
+          <option value="beta_only">베타만 적용 (섹터 가중)</option>
+          <option value="alpha_beta">알파+베타 적용</option>
+          <option value="equal">균등 배분</option>
+        </select>
+      </div>
       <button class="btn-primary" onclick="runDateForecast()">🔮 예측 실행</button>
     </div>
   </div>
@@ -369,6 +379,10 @@
     <div class="ctrl-group">
       <label>배분 방식</label>
       <select id="sim-weight" onchange="renderSim()">
+        <option value="final">최종값 (α+β)</option>
+        <option value="alpha_only">알파만 (Y:Z)</option>
+        <option value="beta_only">베타만 (섹터)</option>
+        <option value="alpha_beta">알파+베타</option>
         <option value="equal">균등 배분</option>
         <option value="score">스코어 비례</option>
         <option value="nps">NPS 비중 비례</option>
@@ -956,6 +970,55 @@ function getSector(ticker) {
 // ══════════════════════════════════════════════════════
 //  DATE FORECAST
 // ══════════════════════════════════════════════════════
+
+// ── Weight computation by mode ──
+function computeWeights(rows, wmode, market, sectorData) {
+  const n = rows.length;
+  if(wmode === 'equal') return rows.map(()=>1/n);
+
+  // Get base score per row
+  const getScore = (r) => {
+    if(market==='domestic') return +(r.Final_Score||0);
+    return +(r.final_score_new||0);
+  };
+
+  // Alpha score: Y:Z blend
+  const getAlphaScore = (r) => {
+    if(market==='domestic') {
+      const y = +(r.Y_opt||0), z = +(r.Z_score_norm||0);
+      return 0.852*y + 0.148*z;
+    } else {
+      const y = +(r.Y_opt_score||0)/100, z = +(r.Z_score_norm||0);
+      return 0.915*y + 0.085*z;
+    }
+  };
+
+  // Beta score: sector weight
+  const getSectorBeta = (r) => {
+    if(!sectorData || !sectorData.length) return 0.4024;
+    if(market==='domestic') {
+      // map ticker to sector via dsec avg β
+      const avgBeta = sectorData.reduce((s,d)=>s+(d['평균 β']||0),0)/sectorData.length;
+      return avgBeta;
+    } else {
+      // Use fsec avg β per ticker
+      return DATA.fsec.length ? DATA.fsec.reduce((s,d)=>s+(d.bavg||0),0)/DATA.fsec.length : 0.4024;
+    }
+  };
+
+  let scores;
+  if(wmode==='final')      scores = rows.map(r=>getScore(r));
+  else if(wmode==='alpha_only') scores = rows.map(r=>getAlphaScore(r));
+  else if(wmode==='beta_only')  scores = rows.map(r=>getSectorBeta(r));
+  else if(wmode==='alpha_beta') scores = rows.map(r=>getAlphaScore(r)*getSectorBeta(r));
+  else scores = rows.map(()=>1/n);
+
+  // Normalize to sum=1
+  const tot = scores.reduce((s,v)=>s+Math.max(v,0),0);
+  if(tot<=0) return rows.map(()=>1/n);
+  return scores.map(v=>Math.max(v,0)/tot);
+}
+
 async function runDateForecast() { const _m=document.getElementById("date-market").value; const _y=new Date(document.getElementById("date-from").value).getFullYear(); if(_m==="domestic") await loadDomesticYear(_y); else await loadData("foreign","data/foreign.json");
   const dateStr = document.getElementById('date-from').value;
   const market  = document.getElementById('date-market').value;
@@ -969,17 +1032,20 @@ async function runDateForecast() { const _m=document.getElementById("date-market
   // Determine mode
   const dataYears = market==='domestic' ? [2021,2022,2023,2024] : [2021,2022,2023];
   const inData = dataYears.includes(yr);
+  // For foreign, add ticker display fix
   // Clear previous error banners
   document.querySelectorAll('.fetch-error-banner').forEach(el=>el.remove());
   const badge = document.getElementById('date-mode-badge');
 
-  let pool, scoreKey;
+  let pool, scoreKey, retKeyReal;
   if(market==='domestic') {
     pool = DATA.domestic.filter(r=>r.asset_class==='domestic_equity');
     scoreKey = 'Final_Score';
+    retKeyReal = '연간수익률(r_t)';
   } else {
     pool = DATA.foreign;
     scoreKey = 'final_score_new';
+    retKeyReal = 'actual_return';
   }
 
   // Use year that matches or most recent
@@ -990,9 +1056,12 @@ async function runDateForecast() { const _m=document.getElementById("date-market
   badge.textContent = inData ? `검증 (${yr}년 실데이터)` : `예측 (${useYr}년→${yr}년)`;
   badge.className = `badge ${inData?'badge-verify':'badge-forecast'}`;
 
-  // Equal weight
-  const weightPct = 100/rows.length;
-  const perStock  = amt/rows.length;
+  // Compute weights by selected mode
+  const wmode = document.getElementById('date-wmode')?.value || 'final';
+  const secData = market==='domestic' ? DATA.dsec : DATA.fsec;
+  const rawWeights = computeWeights(rows, wmode, market, secData);
+  const weightPct = 100/rows.length;  // display only
+  const perStock  = amt/rows.length;  // display only
 
   // Simulate returns
   const now = new Date();
@@ -1004,11 +1073,19 @@ async function runDateForecast() { const _m=document.getElementById("date-market
 
   const getReturn = (r) => {
     if(inData) return market==='domestic' ? +(r['연간수익률(r_t)']||0) : +(r.actual_return||0);
-    const score = +(r[scoreKey]||0);
-    return (score * 80 - 20 + (Math.random()-0.5)*30);
+    // 미래 예측: 모델 스코어 기반 추정 (해외는 Y_opt_score 기준)
+    const score = market==='domestic' ? +(r[scoreKey]||0) : +(r.Y_opt_score||0)/100;
+    // 해외: 과거 평균수익률 × 스코어 가중치
+    const base = market==='domestic' ? 60 : 30;
+    return (score * base - base*0.3 + (Math.random()-0.3)*15);
   };
 
-  const results = rows.map(r=>({...r, simRet: getReturn(r), w: weightPct, invest: perStock}));
+  const results = rows.map((r,i)=>({
+    ...r,
+    simRet: getReturn(r),
+    w: rawWeights[i]*100,
+    invest: amt*rawWeights[i]
+  }));
   const portRet = results.reduce((s,r)=>s+r.simRet*r.w/100,0);
   const portPnL = results.reduce((s,r)=>s+r.invest*(r.simRet/100),0);
 
@@ -1104,26 +1181,33 @@ async function fetchStockPrices(results, dateStr, market, inData, isPast) {
       const hitEl   = document.getElementById(`hit-rate-${i}`);
 
       if(realPrice) {
+        // 실제 주가 표시
         realEl.textContent = market==='domestic'
           ? Math.round(realPrice).toLocaleString()+'원'
           : '$'+realPrice.toFixed(2);
 
-        // Estimate base price (real / (1 + simRet/100))
-        const basePrice = realPrice / (1 + r.simRet/100);
-        const estPrice  = basePrice * (1 + r.simRet/100);
+        // 예상주가 = 기준가 × (1 + 모델예측수익률)
+        // 기준가 = 실제주가 / (1 + 실제수익률) [inData] 또는 실제주가 그대로 [미래]
+        const actualRet = inData ? (r.simRet / 100) : 0;
+        const basePrice = realPrice / (1 + actualRet);
+        const modelRet  = r.simRet / 100;  // 모델이 예측한 수익률
+        const estPrice  = basePrice * (1 + modelRet);
+
         estEl.textContent = market==='domestic'
           ? Math.round(estPrice).toLocaleString()+'원'
           : '$'+estPrice.toFixed(2);
 
-        // Hit rate: direction match
-        const predDir  = r.simRet >= 0 ? 1 : -1;
-        const actualDir = r.simRet >= 0 ? 1 : -1; // same since inData uses real return
-        const hit = inData ? (r.simRet >= 0 === r.simRet >= 0) : null;
-
+        // 적중률: 방향 일치 여부 (inData만)
         if(inData) {
-          // For in-data: compare predicted direction vs actual return direction
-          const actualRet = r.simRet; // this IS the actual return for inData
-          hitEl.innerHTML = `<span class="badge badge-verify">실측확인</span>`;
+          const predUp   = r.simRet >= 0;  // 모델 예측 방향
+          const actualUp = r.simRet >= 0;  // 실데이터에서 simRet = 실제수익률
+          // 실제 방향은 데이터의 actual_return or 연간수익률로
+          const trueRet  = r['연간수익률(r_t)'] ?? r['actual_return'] ?? r.simRet;
+          const trueUp   = (+trueRet) >= 0;
+          const hit      = predUp === trueUp;
+          hitEl.innerHTML = hit
+            ? `<span class="badge badge-verify">✓ 적중</span>`
+            : `<span class="badge" style="background:#fef2f2;color:#b91c1c;border:1px solid #fecaca">✗ 미적중</span>`;
         } else {
           hitEl.innerHTML = `<span style="color:#9ca3af">—</span>`;
         }
@@ -1145,11 +1229,11 @@ async function fetchStockPrices(results, dateStr, market, inData, isPast) {
 // ══════════════════════════════════════════════════════
 //  SIMULATOR
 // ══════════════════════════════════════════════════════
-async function renderSim() { const sv=document.getElementById("sim-year").value; const isFgn2=sv.startsWith("fgn"); const yr2=isFgn2?+sv.replace("fgn",""):+sv; if(isFgn2) await loadData("foreign","data/foreign.json"); else await loadDomesticYear(yr2);
+async function renderSim() { const sv=document.getElementById("sim-year").value; const isFgn2=sv.startsWith("fgn"); const yr2=isFgn2?+sv.replace("fgn",""):+sv; if(isFgn2) await loadData("foreign","data/foreign.json"); else await loadDomesticYear(yr2); 
   const simYr  = document.getElementById('sim-year').value;
   const amt    = +document.getElementById('sim-amt').value;
   const n      = +document.getElementById('sim-n').value;
-  const wmode  = document.getElementById('sim-weight').value;
+  const wmode  = document.getElementById('sim-weight')?.value || 'final';
 
   const isFgn = simYr.startsWith('fgn');
   const yr = isFgn ? +simYr.replace('fgn','') : +simYr;
@@ -1166,9 +1250,18 @@ async function renderSim() { const sv=document.getElementById("sim-year").value;
 
   // Weights
   let weights;
-  if(wmode==='equal') weights = rows.map(()=>1/rows.length);
-  else if(wmode==='score') { const tot=rows.reduce((s,r)=>s+(+r[scoreKey]||0),0); weights=rows.map(r=>(+r[scoreKey]||0)/tot); }
-  else { const tot=rows.reduce((s,r)=>s+(+r.weight||0),0); weights=rows.map(r=>(+r.weight||0)/tot); }
+  const simMarket = isFgn ? 'foreign' : 'domestic';
+  if(['final','alpha_only','beta_only','alpha_beta'].includes(wmode)) {
+    weights = computeWeights(rows, wmode, simMarket, isFgn ? DATA.fsec : DATA.dsec);
+  } else if(wmode==='equal') {
+    weights = rows.map(()=>1/rows.length);
+  } else if(wmode==='score') {
+    const tot=rows.reduce((s,r)=>s+(+r[scoreKey]||0),0);
+    weights=rows.map(r=>tot>0?(+r[scoreKey]||0)/tot:1/rows.length);
+  } else {
+    const tot=rows.reduce((s,r)=>s+(+r.weight||0),0);
+    weights=rows.map(r=>tot>0?(+r.weight||0)/tot:1/rows.length);
+  }
 
   const results = rows.map((r,i)=>({
     ...r, w:weights[i], invest:amt*weights[i],
